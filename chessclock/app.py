@@ -7,13 +7,11 @@ from android.widget import Button
 from android.os import SystemClock
 from android.os import Handler
 
-from collections import namedtuple
+from android.util import Log
 
 # delay in milliseconds for time handler
 time_task_handler_delay = 20
 
-
-Timer = namedtuple('Timer', 'time, delay')
 
 
 def sub2(t, d, tick):
@@ -26,9 +24,14 @@ def sub2(t, d, tick):
 
 class TimeUpdateTask(implements=java.lang.Runnable):
 
-    def __init__(self, clock: 'Clock', handler: Handler):
+    def __init__(self, clock, handler):
+        """
+        on_tick: function called per tick
+        handler: Android os Handler, tied to application's main thread.
+        """
         self.clock = clock
         self.handler = handler
+        Log.i('TimeUpdateTask', 'initialized')
 
     def run(self) -> void:
         uptime_millis = SystemClock.uptimeMillis()
@@ -36,83 +39,136 @@ class TimeUpdateTask(implements=java.lang.Runnable):
         self.clock.start_time_millis = uptime_millis
 
         self.handler.postDelayed(self, time_task_handler_delay)
-        self.clock.on_tick(elapsed_millis)
+        self.clock._on_handler_tick(elapsed_millis)
 
 
-class Clock:
+class BaseClock:
     """
     on top of the base clock we also have HourGlass, DelayClock
     """
 
     def __init__(self, application):
-        """
-        state: ['active', 'inactive', 'finished']
-        """
-        self.debug_time = 0
 
+        # call for updating ui
         self._application = application
 
-        self.state = 'inactive'
-        self.turn = None  # if inactive: means the player who's turn it is to play
-        # if active: means the player, who is currently playing
-        # if none: means the game has not been started yet
+        # possible values of state = ['new', 'active', 'paused', 'finished']
+        self.state = 'new'
+
+        self.turn = None
 
         # time control
-        self.time_control = None
+        self.w_time = None
+        self.w_delay = None
+        self.b_time = None
+        self.b_delay = None
 
         # timer task
         self.start_time_millis = None
         self.time_handler = Handler()
         self.time_update_task = TimeUpdateTask(self, self.time_handler)
 
-    def resume(self):
-        if self.state == 'inactive' and self.turn is not None:
+        Log.i('BaseClock', 'initialized')
+
+    def pause_or_resume(self):
+        if self.state == 'active':
+            self.state = 'paused'
+            self.time_handler.removeCallbacks(self.time_update_task)
+            self._application.pause_button.setText('Resume')
+        elif self.state == 'paused':
             self.state = 'active'
             self._start_timer()
-
-    def pause(self):
-        self.time_handler.removeCallbacks(self.time_update_task)
-        self.state = 'inactive'
+            self._application.pause_button.setText('Pause')
 
     def restart(self):
-        # TODO: set timer values to their original
-        self.turn = None
+        Log.i('BaseClock', 'called restart()')
         self.time_handler.removeCallbacks(self.time_update_task)
-        self.state = 'inactive'
+        self.state = 'new'
+        self.turn = None
+        self._reset_timers()
 
     def _start_timer(self):
         """
         Starts the timer
         """
+        Log.i('BaseClock', 'called _start_timer()')
         self.start_time_millis = SystemClock.uptimeMillis()
         self.time_handler.removeCallbacks(self.time_update_task)
         self.time_handler.postDelayed(self.time_update_task, time_task_handler_delay)
 
-    def on_tick(self, ms):
+    def _on_handler_tick(self, ms):
         """
         callback called every tick
         TODO: should this function handle updating the UI?
         """
-        self.time_control.tick(ms)
+
+        self._on_tick(ms)
+
+        # Checks if the timers have run out.
+        if self.b_time <= 0 or self.w_time <= 0:
+            self.time_handler.removeCallbacks(self.time_update_task)
+            self.state = 'finished'
+            self.turn = None
+
         self._application.update_ui()
 
     def on_switch_click(self, player):
-        if self.turn is None:
-            self.turn = player
+        Log.i('BaseClock', 'called on_switch_player(%s), self.state:%s, self.turn:%s'
+              % (player, self.state, self.turn))
+        # Starts the clock if game hasn't started yet.
+        if self.state == 'new':
+            self.turn = 'w' if player == 'b' else 'b'
+            self.state = 'active'
             self._start_timer()
-        elif self.turn == 'w' and self.state == 'active':
-            self.turn = 'b'
 
+        # Switches the active clock
+        elif self.state == 'active':
+            Log.i('BaseClock', 'in active branch')
+            if player == 'w' and self.turn == 'w':
+                Log.i('BaseClock', 'switching to black')
+                self.turn = 'b'
+            elif player == 'b' and self.turn == 'b':
+                self.turn = 'w'
+                Log.i('BaseClock', 'switching to white')
 
-class BaseTimeControl:
-
-    def __init__(self):
-        self.w_timer = Timer(0, None)
-        self.b_timer = Timer(0, None)
-
-    def tick(self, ms):
+    def _reset_timers(self):
         pass
 
+    def _on_tick(self, ms):
+        pass
+
+
+class SuddenDeathClock(BaseClock):
+
+    def __init__(self, application, w_start_time, b_start_time):
+        super().__init__(application)
+        self.w_start_time = w_start_time
+        self.b_start_time = b_start_time
+        self._reset_timers()
+
+    def _reset_timers(self):
+        self.w_time = self.w_start_time
+        self.b_time = self.b_start_time
+
+    def _on_tick(self, ms):
+        if self.turn == 'w':
+            self.w_time = self.w_time - ms
+        else:
+            self.b_time = self.b_time - ms
+
+
+class HourGlassClock(SuddenDeathClock):
+
+    def __init__(self, application, w_start_time, b_start_time):
+        super().__init__(application, w_start_time, b_start_time)
+
+    def _on_tick(self, ms):
+        if self.turn == 'w':
+            self.w_time = self.w_time - ms
+            self.b_time = self.b_time + ms
+        else:
+            self.b_time = self.b_time - ms
+            self.w_time = self.w_time + ms
 
 
 class ButtonClick(implements=android.view.View[OnClickListener]):
@@ -133,7 +189,8 @@ class MyApplication:
 
     def __init__(self):
         self.activity = None
-        self.clock = Clock(self)
+        # self.clock = BaseClock(self.update_ui)
+        self.clock = HourGlassClock(self, 10000, 10000)
         # self.clock = None
 
     def link(self, activity):
@@ -144,35 +201,54 @@ class MyApplication:
         vlayout = LinearLayout(self.activity)
         vlayout.setOrientation(LinearLayout.VERTICAL)
 
+        # Top clock
+        top_vlayout = LinearLayout(self.activity)
+
         self.top_clock = TextView(self.activity)
         self.top_clock.setTextSize(50)
-        self.top_clock.setOnClickListener(ButtonClick(self.top_player_touched))
-        vlayout.addView(self.top_clock)
 
+        self.top_delay = TextView(self.activity)
+        self.top_delay.setTextSize(15)
+
+        top_vlayout.setOnClickListener(ButtonClick(self.top_player_touched))
+        top_vlayout.addView(self.top_clock)
+        top_vlayout.addView(self.top_delay)
+        vlayout.addView(top_vlayout)
+
+        # Button row
         button_layout = LinearLayout(self.activity)
         button_layout.setOrientation(LinearLayout.HORIZONTAL)
         vlayout.addView(button_layout)
 
         self.pause_button = Button(self.activity)
         self.pause_button.setText('Pause')
-        self.pause_button.setOnClickListener(ButtonClick(self.pause_clicked))
+        self.pause_button.setOnClickListener(ButtonClick(self.pause_or_resume_clicked))
         button_layout.addView(self.pause_button)
 
         self.restart_button = Button(self.activity)
         self.restart_button.setText('Restart')
-        self.pause_button.setOnClickListener(ButtonClick(self.restart_clicked))
+        self.restart_button.setOnClickListener(ButtonClick(self.restart_clicked))
         button_layout.addView(self.restart_button)
 
-        self.bottom_clock = TextView(self.activity)
-        self.bottom_clock.setTextSize(50)
-        self.bottom_clock.setOnClickListener(ButtonClick(self.bottom_player_touched))
-        vlayout.addView(self.bottom_clock)
+        # Bottom clock
+        bot_vlayout = LinearLayout(self.activity)
+
+        self.bot_clock = TextView(self.activity)
+        self.bot_clock.setTextSize(50)
+
+        self.bot_delay = TextView(self.activity)
+        self.bot_delay.setTextSize(15)
+
+        bot_vlayout.setOnClickListener(ButtonClick(self.bottom_player_touched))
+        bot_vlayout.addView(self.bot_clock)
+        bot_vlayout.addView(self.bot_delay)
+        vlayout.addView(bot_vlayout)
 
         self.activity.setContentView(vlayout)
 
     def onStart(self):
         self.top_clock.setText("I'm top")
-        self.bottom_clock.setText("I'm bottom")
+        self.bot_clock.setText("I'm bottom")
 
     def top_player_touched(self):
         self.clock.on_switch_click('w')
@@ -182,20 +258,20 @@ class MyApplication:
         self.clock.on_switch_click('b')
         return True
 
-    def pause_clicked(self):
-        self.clock.pause()
-        pass
+    def pause_or_resume_clicked(self):
+        Log.i('MyApplication', 'called pause_clicked()')
+        self.clock.pause_or_resume()
 
     def restart_clicked(self):
+        Log.i('MyApplication', 'called restart_clicked()')
         self.clock.restart()
-        pass
 
     def update_ui(self):
-        self.top_clock.setText(str(self.clock.time_control.w_timer[0]))
-        self.bottom_clock.setText(str(self.clock.time_control.b_timer[0]))
+        self.top_clock.setText(str(self.clock.w_time))
+        self.bot_clock.setText(str(self.clock.b_time))
 
 
-
+# Binds Python code to main Android activity (PythonActivity).
 app = MyApplication()
 python_activity = android.PythonActivity.setListener(app)
 app.link(python_activity)

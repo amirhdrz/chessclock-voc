@@ -29,7 +29,7 @@ dependencies {
 apply plugin: VocPlugin
 
 voc {
-    namespace = 'org.grapesoda'
+    namespace = 'org.grapesoda.debug'
     sourcesDir = 'chessclock'
 }
 
